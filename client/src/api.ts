@@ -1,4 +1,4 @@
-import type { AnalysisResult, MatchResult, RuleInput } from './types';
+import type { AnalysisResult, ImpactResult, MatchResult, RuleInput } from './types';
 
 async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -19,4 +19,12 @@ export function analyzeRules(rules: RuleInput[]): Promise<AnalysisResult> {
 
 export function matchPath(rules: RuleInput[], path: string): Promise<MatchResult> {
   return post<MatchResult>('/api/match', { rules, path });
+}
+
+export function computeImpact(
+  baseline: RuleInput[],
+  candidate: RuleInput[],
+  samples: string,
+): Promise<ImpactResult> {
+  return post<ImpactResult>('/api/impact', { baseline, candidate, samples });
 }

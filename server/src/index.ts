@@ -1,12 +1,14 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
-import { analyze, simulate, RuleInput } from './analyzer';
+import { analyze, impact, simulate, RuleInput } from './analyzer';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
 const MAX_RULES = 500;
 const MAX_PATTERN_LEN = 500;
+const MAX_SAMPLES = 5000;
+const MAX_SAMPLES_TEXT_LEN = 200_000;
 
 /** 清洗客户端提交的单条规则，返回安全的 RuleInput。 */
 function sanitizeRule(raw: unknown): RuleInput | null {
@@ -20,9 +22,8 @@ function sanitizeRule(raw: unknown): RuleInput | null {
   return { pattern, priority, enabled };
 }
 
-function sanitizeRules(body: unknown): RuleInput[] | null {
-  if (body === null || typeof body !== 'object') return null;
-  const rules = (body as Record<string, unknown>).rules;
+/** 清洗规则数组；非法时返回 null。 */
+function sanitizeRuleList(rules: unknown): RuleInput[] | null {
   if (!Array.isArray(rules) || rules.length > MAX_RULES) return null;
   const out: RuleInput[] = [];
   for (const raw of rules) {
@@ -31,6 +32,11 @@ function sanitizeRules(body: unknown): RuleInput[] | null {
     out.push(rule);
   }
   return out;
+}
+
+function sanitizeRules(body: unknown): RuleInput[] | null {
+  if (body === null || typeof body !== 'object') return null;
+  return sanitizeRuleList((body as Record<string, unknown>).rules);
 }
 
 app.post('/api/analyze', (req: Request, res: Response) => {
@@ -50,6 +56,34 @@ app.post('/api/match', (req: Request, res: Response) => {
     return;
   }
   res.json(simulate(rules, pathInput));
+});
+
+app.post('/api/impact', (req: Request, res: Response) => {
+  const body = req.body as Record<string, unknown> | null;
+  if (body === null || typeof body !== 'object') {
+    res.status(400).json({ error: '请求非法' });
+    return;
+  }
+  const baseline = sanitizeRuleList(body.baseline);
+  const candidate = sanitizeRuleList(body.candidate);
+  const samples = body.samples;
+  if (
+    !baseline ||
+    !candidate ||
+    typeof samples !== 'string' ||
+    samples.length > MAX_SAMPLES_TEXT_LEN
+  ) {
+    res.status(400).json({
+      error: `请求非法：需要 baseline/candidate 规则数组（各至多 ${MAX_RULES} 条）和 samples 文本`,
+    });
+    return;
+  }
+  const result = impact(baseline, candidate, samples);
+  if (result.entries.length > MAX_SAMPLES) {
+    res.status(400).json({ error: `样本过多：至多 ${MAX_SAMPLES} 条合法样本` });
+    return;
+  }
+  res.json(result);
 });
 
 app.get('/api/health', (_req: Request, res: Response) => {

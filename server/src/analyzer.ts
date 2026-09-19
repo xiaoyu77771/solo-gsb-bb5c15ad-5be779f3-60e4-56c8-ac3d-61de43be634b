@@ -46,6 +46,62 @@ export interface AnalysisResult {
   conflicts: ConflictPair[];
 }
 
+// ---------- 变更影响分析 ----------
+
+/** 影响分类：命中迁移 / 新增命中 / 变为未命中 / 无变化 */
+export type ImpactCategory = 'migrated' | 'new-hit' | 'became-unmatched' | 'unchanged';
+
+export interface SampleSpec {
+  line: number; // 原始输入中的行号（从 1 开始）
+  path: string; // 规范化后的路径
+  count: number; // 请求次数（≥1）
+}
+
+export interface SampleParseError {
+  line: number;
+  raw: string;
+  error: string;
+}
+
+export interface ImpactWinner {
+  id: string;
+  pattern: string;
+  priority: number;
+}
+
+export interface ImpactEntry {
+  line: number;
+  path: string;
+  count: number;
+  category: ImpactCategory;
+  baselineWinner: ImpactWinner | null;
+  candidateWinner: ImpactWinner | null;
+}
+
+export interface ImpactCategorySummary {
+  samples: number; // 该分类下的样本条数
+  requests: number; // 该分类下的请求次数合计
+}
+
+export interface ImpactSummary {
+  totalSamples: number;
+  totalRequests: number;
+  affectedSamples: number; // 分类非「无变化」的样本条数
+  affectedRequests: number; // 分类非「无变化」的请求次数合计
+  categories: Record<ImpactCategory, ImpactCategorySummary>;
+}
+
+export interface ImpactResult {
+  baselineRules: AnalyzedRule[];
+  candidateRules: AnalyzedRule[];
+  entries: ImpactEntry[];
+  sampleErrors: SampleParseError[];
+  summary: ImpactSummary;
+}
+
+export const MAX_SAMPLE_COUNT = 1_000_000_000;
+export const MAX_SAMPLE_PATH_LEN = 2000;
+
 export interface MatchResult {
   path: string;
   matches: string[]; // 所有命中的启用规则 id，按胜出顺序排列
@@ -203,9 +259,9 @@ export function findWinner(
   return best;
 }
 
-/** 完整分析：解析规则、两两求交找冲突、为每个冲突模拟最终命中。 */
-export function analyze(inputs: RuleInput[]): AnalysisResult {
-  const rules: AnalyzedRule[] = inputs.map((input, index) => {
+/** 解析输入规则为 AnalyzedRule 列表（含错误信息，不做冲突分析）。 */
+export function parseRules(inputs: RuleInput[]): AnalyzedRule[] {
+  return inputs.map((input, index) => {
     const base = {
       id: `R${index + 1}`,
       index,
@@ -224,6 +280,11 @@ export function analyze(inputs: RuleInput[]): AnalysisResult {
     }
     return base;
   });
+}
+
+/** 完整分析：解析规则、两两求交找冲突、为每个冲突模拟最终命中。 */
+export function analyze(inputs: RuleInput[]): AnalysisResult {
+  const rules = parseRules(inputs);
 
   const usable = rules.filter((r) => r.enabled && !r.error);
   const conflicts: ConflictPair[] = [];
@@ -257,5 +318,129 @@ export function simulate(inputs: RuleInput[], path: string): MatchResult {
     path: '/' + pathSegs.join('/'),
     matches: hits.map((r) => r.id),
     winner: hits.length > 0 ? hits[0].id : null,
+  };
+}
+
+/**
+ * 解析请求样本：每行「次数 路径」或「路径」（次数缺省为 1）。
+ * 空行与 # 注释行跳过；非法行记入 errors 且不产生样本。
+ */
+export function parseSamples(text: string): {
+  samples: SampleSpec[];
+  errors: SampleParseError[];
+} {
+  const samples: SampleSpec[] = [];
+  const errors: SampleParseError[] = [];
+  text.split('\n').forEach((line, i) => {
+    const lineNo = i + 1;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return;
+    const fail = (error: string) => errors.push({ line: lineNo, raw: trimmed, error });
+
+    const tokens = trimmed.split(/\s+/);
+    let count = 1;
+    let pathToken: string;
+    if (tokens.length === 1) {
+      if (/^-?\d+$/.test(tokens[0])) {
+        fail('只有次数，缺少路径');
+        return;
+      }
+      pathToken = tokens[0];
+    } else if (tokens.length === 2) {
+      const countToken = tokens[0];
+      if (!/^-?\d+$/.test(countToken)) {
+        fail(`次数 "${countToken}" 非法：需为正整数`);
+        return;
+      }
+      count = parseInt(countToken, 10);
+      pathToken = tokens[1];
+    } else {
+      fail('格式非法：应为「次数 路径」或「路径」');
+      return;
+    }
+
+    if (count < 1) {
+      fail(`次数 "${tokens[0]}" 非法：需为正整数`);
+      return;
+    }
+    if (!Number.isSafeInteger(count) || count > MAX_SAMPLE_COUNT) {
+      fail(`次数过大（上限 ${MAX_SAMPLE_COUNT}）`);
+      return;
+    }
+    if (!pathToken.startsWith('/')) {
+      fail(`路径 "${pathToken}" 非法：须以 / 开头`);
+      return;
+    }
+    if (pathToken.length > MAX_SAMPLE_PATH_LEN) {
+      fail(`路径过长（上限 ${MAX_SAMPLE_PATH_LEN} 字符）`);
+      return;
+    }
+    samples.push({ line: lineNo, path: '/' + splitPath(pathToken).join('/'), count });
+  });
+  return { samples, errors };
+}
+
+/**
+ * 变更影响分析：对每条样本分别在基线与候选规则下求最终命中，
+ * 按「命中迁移 / 新增命中 / 变为未命中 / 无变化」分类并汇总请求次数。
+ * 两侧胜出者视为同一规则当且仅当规范化模式与优先级均相同。
+ */
+export function impact(
+  baselineInputs: RuleInput[],
+  candidateInputs: RuleInput[],
+  sampleText: string,
+): ImpactResult {
+  const baselineRules = parseRules(baselineInputs);
+  const candidateRules = parseRules(candidateInputs);
+  const { samples, errors } = parseSamples(sampleText);
+
+  const categories: Record<ImpactCategory, ImpactCategorySummary> = {
+    migrated: { samples: 0, requests: 0 },
+    'new-hit': { samples: 0, requests: 0 },
+    'became-unmatched': { samples: 0, requests: 0 },
+    unchanged: { samples: 0, requests: 0 },
+  };
+
+  const toWinner = (r: AnalyzedRule): ImpactWinner => ({
+    id: r.id,
+    pattern: r.pattern,
+    priority: r.priority,
+  });
+
+  const entries: ImpactEntry[] = samples.map((s) => {
+    const pathSegs = splitPath(s.path);
+    const b = findWinner(baselineRules, pathSegs);
+    const c = findWinner(candidateRules, pathSegs);
+    let category: ImpactCategory;
+    if (!b && !c) category = 'unchanged';
+    else if (!b) category = 'new-hit';
+    else if (!c) category = 'became-unmatched';
+    else if (b.pattern === c.pattern && b.priority === c.priority) category = 'unchanged';
+    else category = 'migrated';
+    categories[category].samples += 1;
+    categories[category].requests += s.count;
+    return {
+      line: s.line,
+      path: s.path,
+      count: s.count,
+      category,
+      baselineWinner: b ? toWinner(b) : null,
+      candidateWinner: c ? toWinner(c) : null,
+    };
+  });
+
+  const totalRequests = samples.reduce((acc, s) => acc + s.count, 0);
+  return {
+    baselineRules,
+    candidateRules,
+    entries,
+    sampleErrors: errors,
+    summary: {
+      totalSamples: samples.length,
+      totalRequests,
+      affectedSamples: categories.migrated.samples + categories['new-hit'].samples + categories['became-unmatched'].samples,
+      affectedRequests: categories.migrated.requests + categories['new-hit'].requests + categories['became-unmatched'].requests,
+      categories,
+    },
   };
 }

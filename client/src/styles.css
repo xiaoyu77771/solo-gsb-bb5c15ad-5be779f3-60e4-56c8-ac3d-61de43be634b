@@ -215,3 +215,104 @@ code {
   flex-direction: column;
   gap: 4px;
 }
+
+/* ---------- 模式切换 ---------- */
+
+.mode-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.tab {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 7px 18px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab-active,
+.tab-active:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* ---------- 变更影响 ---------- */
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 14px;
+}
+
+.chip {
+  background: #0b101c;
+  color: var(--muted);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 4px 14px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  color: var(--text);
+}
+
+.chip-active,
+.chip-active:hover {
+  border-color: var(--accent);
+  color: #bcd0ff;
+}
+
+.cat-badge {
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.cat-migrated {
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--warn);
+}
+
+.cat-new-hit {
+  background: rgba(34, 197, 94, 0.16);
+  color: var(--winner);
+}
+
+.cat-became-unmatched {
+  background: rgba(239, 68, 68, 0.16);
+  color: var(--error);
+}
+
+.cat-unchanged {
+  background: #263049;
+  color: var(--muted);
+}
+
+.impact-table td {
+  vertical-align: top;
+}
+
+.table-scroll {
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.sample-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 12.5px;
+}
