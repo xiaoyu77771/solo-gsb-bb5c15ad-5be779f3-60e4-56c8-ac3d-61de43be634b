@@ -7,6 +7,8 @@ import {
   analyze,
   simulate,
   splitPath,
+  parseSampleLine,
+  impact,
 } from '../dist/analyzer.js';
 
 const P = (s) => parsePattern(s);
@@ -111,5 +113,102 @@ assert.equal(sim.winner, 'R2');
 assert.deepEqual(sim.matches, ['R2', 'R1', 'R3']);
 assert.equal(simulate(rules, '/nope').winner, null);
 assert.equal(simulate(rules, '/health').winner, 'R4');
+
+// ---------- 样本行解析 ----------
+assert.deepEqual(parseSampleLine('10 /api/users/1'), { count: 10, path: '/api/users/1' });
+assert.deepEqual(parseSampleLine('/api/users/1'), { count: 1, path: '/api/users/1' }); // 次数省略为 1
+assert.equal(parseSampleLine(''), null); // 空行跳过
+assert.equal(parseSampleLine('   '), null);
+assert.equal(parseSampleLine('# 注释'), null); // 注释跳过
+assert.ok('error' in parseSampleLine('10')); // 缺少路径
+assert.ok('error' in parseSampleLine('0 /a')); // 次数必须为正整数
+assert.ok('error' in parseSampleLine('-3 /a'));
+assert.ok('error' in parseSampleLine('abc')); // 路径必须以 / 开头
+assert.ok('error' in parseSampleLine('/a /b')); // 路径含空白
+assert.ok('error' in parseSampleLine('2 /a /b'));
+
+// ---------- 变更影响分析 ----------
+const baselineRules = [
+  { pattern: '/api/users/:id', priority: 100, enabled: true },
+  { pattern: '/api/users/new', priority: 10, enabled: true },
+  { pattern: '/api/*', priority: 1, enabled: true },
+  { pattern: '/health', priority: 0, enabled: true },
+];
+// 候选：/api/users/new 优先级提到 200；删除 /health；新增 /internal/*
+const candidateRules = [
+  { pattern: '/api/users/:id', priority: 100, enabled: true },
+  { pattern: '/api/users/new', priority: 200, enabled: true },
+  { pattern: '/api/*', priority: 1, enabled: true },
+  { pattern: '/internal/*', priority: 2, enabled: true },
+];
+const imp = impact(
+  baselineRules,
+  candidateRules,
+  [
+    '5 /api/users/new', // 命中迁移：:id(100) → new(200)
+    '3 /api/users/42', // 无变化：同为 /api/users/:id(100)
+    '2 /health', // 变为未命中
+    '7 /internal/ops', // 新增命中
+    '/nope', // 两边都未命中 → 无变化
+    'not-a-path', // 非法
+    '4', // 非法：缺少路径
+  ],
+);
+assert.equal(imp.samples.length, 5);
+assert.equal(imp.invalidSamples.length, 2);
+assert.deepEqual(
+  imp.invalidSamples.map((v) => v.line),
+  [6, 7],
+); // 逐行提示，行号从 1 起
+const byPath = Object.fromEntries(imp.samples.map((s) => [s.path, s]));
+assert.equal(byPath['/api/users/new'].category, 'migrated');
+assert.deepEqual(byPath['/api/users/new'].baseline, {
+  id: 'R1',
+  pattern: '/api/users/:id',
+  priority: 100,
+});
+assert.deepEqual(byPath['/api/users/new'].candidate, {
+  id: 'R2',
+  pattern: '/api/users/new',
+  priority: 200,
+});
+assert.equal(byPath['/api/users/42'].category, 'unchanged');
+assert.equal(byPath['/health'].category, 'removed');
+assert.equal(byPath['/health'].candidate, null);
+assert.equal(byPath['/internal/ops'].category, 'added');
+assert.equal(byPath['/internal/ops'].baseline, null);
+assert.equal(byPath['/nope'].category, 'unchanged');
+// 汇总：非法样本不参与统计
+assert.deepEqual(imp.summary.migrated, { samples: 1, requests: 5 });
+assert.deepEqual(imp.summary.removed, { samples: 1, requests: 2 });
+assert.deepEqual(imp.summary.added, { samples: 1, requests: 7 });
+assert.deepEqual(imp.summary.unchanged, { samples: 2, requests: 4 });
+assert.deepEqual(imp.summary.total, { samples: 5, requests: 18 });
+
+// 同一规则判定：规范化模式与优先级均相同 → 无变化（即使书写形式不同）
+const written = impact(
+  [{ pattern: '/api//users/', priority: 5, enabled: true }],
+  [{ pattern: '/api/users', priority: 5, enabled: true }],
+  ['/api/users'],
+);
+assert.equal(written.samples[0].category, 'unchanged');
+// 模式相同但优先级不同 → 命中迁移
+const prioChanged = impact(
+  [{ pattern: '/api/users', priority: 5, enabled: true }],
+  [{ pattern: '/api/users', priority: 6, enabled: true }],
+  ['/api/users'],
+);
+assert.equal(prioChanged.samples[0].category, 'migrated');
+// 禁用与非法规则不参与胜出
+const withDisabled = impact(
+  [
+    { pattern: '/a', priority: 10, enabled: false },
+    { pattern: '/a', priority: 1, enabled: true },
+  ],
+  [{ pattern: '/a', priority: 1, enabled: true }],
+  ['/a'],
+);
+assert.equal(withDisabled.samples[0].category, 'unchanged');
+assert.equal(withDisabled.samples[0].baseline.priority, 1);
 
 console.log('✔ analyzer 全部测试通过');

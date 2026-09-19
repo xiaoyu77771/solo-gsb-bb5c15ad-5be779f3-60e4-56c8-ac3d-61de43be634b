@@ -52,7 +52,46 @@ export interface MatchResult {
   winner: string | null;
 }
 
+/** 变更影响分类：命中迁移 / 新增命中 / 变为未命中 / 无变化。 */
+export type ImpactCategory = 'migrated' | 'added' | 'removed' | 'unchanged';
+
+/** 胜出规则的对外标识；是否“同一规则”只看规范化模式与优先级。 */
+export interface WinnerRef {
+  id: string; // 规则 id，仅用于展示
+  pattern: string; // 规范化后的模式
+  priority: number;
+}
+
+export interface SampleImpact {
+  line: number; // 样本在输入中的行号（1 起）
+  count: number; // 请求次数
+  path: string; // 规范化后的请求路径
+  baseline: WinnerRef | null; // 基线规则下的胜出规则
+  candidate: WinnerRef | null; // 候选规则下的胜出规则
+  category: ImpactCategory;
+}
+
+export interface InvalidSample {
+  line: number;
+  raw: string;
+  error: string;
+}
+
+export interface CategorySummary {
+  samples: number; // 样本条数
+  requests: number; // 请求次数合计
+}
+
+export interface ImpactResult {
+  baselineRules: AnalyzedRule[];
+  candidateRules: AnalyzedRule[];
+  samples: SampleImpact[];
+  invalidSamples: InvalidSample[];
+  summary: Record<ImpactCategory, CategorySummary> & { total: CategorySummary };
+}
+
 const PARAM_PLACEHOLDER = 'x'; // 见证路径中为参数段生成的具体值
+const MAX_SAMPLE_COUNT = 1_000_000_000; // 单条样本允许的最大请求次数
 
 /** 把模式字符串解析为段序列；非法时抛出带说明的错误。 */
 export function parsePattern(raw: string): Segment[] {
@@ -257,5 +296,110 @@ export function simulate(inputs: RuleInput[], path: string): MatchResult {
     path: '/' + pathSegs.join('/'),
     matches: hits.map((r) => r.id),
     winner: hits.length > 0 ? hits[0].id : null,
+  };
+}
+
+/**
+ * 解析一行请求样本：格式为 “次数 路径”，次数省略时为 1。
+ * 空行与 # 注释返回 null（跳过）；非法行返回 { error }。
+ */
+export function parseSampleLine(
+  line: string,
+): { count: number; path: string } | { error: string } | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith('#')) return null;
+  const tokens = trimmed.split(/\s+/);
+  let count = 1;
+  let pathToken: string;
+  if (/^-?\d+$/.test(tokens[0])) {
+    // 首个 token 是整数 → 视为次数
+    const n = Number(tokens[0]);
+    if (!Number.isSafeInteger(n) || n < 1) {
+      return { error: `次数 "${tokens[0]}" 必须为正整数` };
+    }
+    if (n > MAX_SAMPLE_COUNT) {
+      return { error: `次数 "${tokens[0]}" 超出上限 ${MAX_SAMPLE_COUNT}` };
+    }
+    if (tokens.length < 2) return { error: '缺少请求路径' };
+    if (tokens.length > 2) return { error: '路径中不能包含空白字符' };
+    count = n;
+    pathToken = tokens[1];
+  } else {
+    if (tokens.length > 1) return { error: '路径中不能包含空白字符' };
+    pathToken = tokens[0];
+  }
+  if (!pathToken.startsWith('/')) {
+    return { error: `路径 "${pathToken}" 必须以 / 开头` };
+  }
+  return { count, path: pathToken };
+}
+
+function winnerRef(rule: AnalyzedRule | null): WinnerRef | null {
+  return rule ? { id: rule.id, pattern: rule.pattern, priority: rule.priority } : null;
+}
+
+/** 规范化模式与优先级均相同才视为同一规则。 */
+function sameWinner(a: WinnerRef | null, b: WinnerRef | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.pattern === b.pattern && a.priority === b.priority;
+}
+
+/**
+ * 变更影响分析：对每条合法样本，分别用基线与候选规则模拟最终命中，
+ * 按“命中迁移、新增命中、变为未命中、无变化”分类并汇总请求次数。
+ * 非法样本逐行记录错误，不参与统计。
+ */
+export function impact(
+  baselineInputs: RuleInput[],
+  candidateInputs: RuleInput[],
+  sampleLines: string[],
+): ImpactResult {
+  const baseline = analyze(baselineInputs);
+  const candidate = analyze(candidateInputs);
+  const samples: SampleImpact[] = [];
+  const invalidSamples: InvalidSample[] = [];
+  const summary: ImpactResult['summary'] = {
+    migrated: { samples: 0, requests: 0 },
+    added: { samples: 0, requests: 0 },
+    removed: { samples: 0, requests: 0 },
+    unchanged: { samples: 0, requests: 0 },
+    total: { samples: 0, requests: 0 },
+  };
+
+  sampleLines.forEach((line, i) => {
+    const parsed = parseSampleLine(line);
+    if (parsed === null) return; // 空行或注释
+    if ('error' in parsed) {
+      invalidSamples.push({ line: i + 1, raw: line.trim(), error: parsed.error });
+      return;
+    }
+    const pathSegs = splitPath(parsed.path);
+    const bw = winnerRef(findWinner(baseline.rules, pathSegs));
+    const cw = winnerRef(findWinner(candidate.rules, pathSegs));
+    let category: ImpactCategory;
+    if (bw === null && cw === null) category = 'unchanged';
+    else if (bw === null) category = 'added';
+    else if (cw === null) category = 'removed';
+    else category = sameWinner(bw, cw) ? 'unchanged' : 'migrated';
+    samples.push({
+      line: i + 1,
+      count: parsed.count,
+      path: '/' + pathSegs.join('/'),
+      baseline: bw,
+      candidate: cw,
+      category,
+    });
+    summary[category].samples += 1;
+    summary[category].requests += parsed.count;
+    summary.total.samples += 1;
+    summary.total.requests += parsed.count;
+  });
+
+  return {
+    baselineRules: baseline.rules,
+    candidateRules: candidate.rules,
+    samples,
+    invalidSamples,
+    summary,
   };
 }

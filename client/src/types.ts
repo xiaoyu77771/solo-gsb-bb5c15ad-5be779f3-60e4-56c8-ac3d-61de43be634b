@@ -38,3 +38,40 @@ export interface MatchResult {
   matches: string[];
   winner: string | null;
 }
+
+// ---------- 变更影响 ----------
+export type ImpactCategory = 'migrated' | 'added' | 'removed' | 'unchanged';
+
+export interface WinnerRef {
+  id: string;
+  pattern: string;
+  priority: number;
+}
+
+export interface SampleImpact {
+  line: number;
+  count: number;
+  path: string;
+  baseline: WinnerRef | null;
+  candidate: WinnerRef | null;
+  category: ImpactCategory;
+}
+
+export interface InvalidSample {
+  line: number;
+  raw: string;
+  error: string;
+}
+
+export interface CategorySummary {
+  samples: number;
+  requests: number;
+}
+
+export interface ImpactResult {
+  baselineRules: AnalyzedRule[];
+  candidateRules: AnalyzedRule[];
+  samples: SampleImpact[];
+  invalidSamples: InvalidSample[];
+  summary: Record<ImpactCategory, CategorySummary> & { total: CategorySummary };
+}

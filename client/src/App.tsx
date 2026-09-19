@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { analyzeRules, matchPath } from './api';
 import type { AnalysisResult, MatchResult, RuleInput } from './types';
+import ImpactView from './ImpactView';
 
 const EXAMPLE = `# 每行一条规则：<优先级> <路由模式>
 # :param 匹配单个段，* 匹配零个或多个段
@@ -10,6 +11,21 @@ const EXAMPLE = `# 每行一条规则：<优先级> <路由模式>
 90  /api/users/new
 1   /api/*
 0   /health
+`;
+
+const CANDIDATE_EXAMPLE = `# 候选规则：与基线对比评估变更影响
+100 /api/users/:id
+200 /api/users/new
+1   /api/*
+2   /internal/*
+`;
+
+const SAMPLES_EXAMPLE = `# 每行一条：[次数] 路径，次数省略时为 1
+5 /api/users/new
+3 /api/users/42
+2 /health
+7 /internal/ops
+/api/other
 `;
 
 /** 解析一行输入为 { priority, pattern }；空行与 # 注释返回 null。 */
@@ -28,8 +44,21 @@ function parseLine(line: string): { priority: number; pattern: string } | null {
   return { priority: 0, pattern: trimmed };
 }
 
+/** 把规则文本解析为 RuleInput 列表；disabled 为基线规则中被勾掉的下标。 */
+function toRuleInputs(text: string, disabled?: Set<number>): RuleInput[] {
+  const out: RuleInput[] = [];
+  text.split('\n').forEach((line) => {
+    const parsed = parseLine(line);
+    if (parsed) out.push({ ...parsed, enabled: !(disabled?.has(out.length) ?? false) });
+  });
+  return out;
+}
+
 export default function App() {
+  const [mode, setMode] = useState<'analyze' | 'impact'>('analyze');
   const [text, setText] = useState(EXAMPLE);
+  const [candidateText, setCandidateText] = useState(CANDIDATE_EXAMPLE);
+  const [samplesText, setSamplesText] = useState(SAMPLES_EXAMPLE);
   const [disabled, setDisabled] = useState<Set<number>>(new Set());
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
@@ -37,14 +66,9 @@ export default function App() {
   const [matchResult, setMatchResult] = useState<MatchResult | null>(null);
 
   // 文本 → 规则输入（含启用状态）
-  const ruleInputs: RuleInput[] = useMemo(() => {
-    const out: RuleInput[] = [];
-    text.split('\n').forEach((line) => {
-      const parsed = parseLine(line);
-      if (parsed) out.push({ ...parsed, enabled: !disabled.has(out.length) });
-    });
-    return out;
-  }, [text, disabled]);
+  const ruleInputs: RuleInput[] = useMemo(() => toRuleInputs(text, disabled), [text, disabled]);
+  // 候选规则：全部启用
+  const candidateInputs: RuleInput[] = useMemo(() => toRuleInputs(candidateText), [candidateText]);
 
   // 即时重算：输入或禁用状态变化后防抖调用后端
   const analyzeSeq = useRef(0);
@@ -143,8 +167,34 @@ export default function App() {
         <p>
           粘贴路由规则，找出可能同时命中的规则对，生成最短冲突见证路径，并按优先级模拟最终命中。
         </p>
+        <div className="mode-tabs">
+          <button
+            className={mode === 'analyze' ? 'tab tab-active' : 'tab'}
+            onClick={() => setMode('analyze')}
+          >
+            冲突分析
+          </button>
+          <button
+            className={mode === 'impact' ? 'tab tab-active' : 'tab'}
+            onClick={() => setMode('impact')}
+          >
+            变更影响
+          </button>
+        </div>
       </header>
 
+      {mode === 'impact' ? (
+        <ImpactView
+          baselineText={text}
+          onBaselineTextChange={setText}
+          candidateText={candidateText}
+          onCandidateTextChange={setCandidateText}
+          samplesText={samplesText}
+          onSamplesTextChange={setSamplesText}
+          baselineInputs={ruleInputs}
+          candidateInputs={candidateInputs}
+        />
+      ) : (
       <main className="layout">
         <section className="panel">
           <h2>路由规则</h2>
@@ -283,6 +333,7 @@ export default function App() {
           )}
         </section>
       </main>
+      )}
     </div>
   );
 }
